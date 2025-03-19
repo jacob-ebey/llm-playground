@@ -1,0 +1,38 @@
+@import "tailwindcss";
+
+@theme {
+    --font-mono: BerkeleyMono, monospace;
+    --font-sans: BerkeleyMono, monospace;
+    --font-serif: BerkeleyMono, monospace;
+
+    --color-background: #fff;
+    --color-border: #ccc;
+}
+
+@font-face {
+    font-family: "BerkeleyMono";
+    src: url("/berkeley-mono/BerkeleyMono-Regular.woff2") format("woff2");
+}
+
+@font-face {
+    font-family: "BerkeleyMono";
+    src: url("/berkeley-mono/BerkeleyMono-Bold.woff2") format("woff2");
+    font-weight: bold;
+}
+
+@font-face {
+    font-family: "BerkeleyMono";
+    src: url("/berkeley-mono/BerkeleyMono-Italic.woff2") format("woff2");
+    font-style: italic;
+}
+
+@font-face {
+    font-family: "BerkeleyMono";
+    src: url("/berkeley-mono/BerkeleyMono-BoldItalic.woff2") format("woff2");
+    font-style: italic;
+    font-weight: bold;
+}
+
+* {
+    @apply border-border;
+}

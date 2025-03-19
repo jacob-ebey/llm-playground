@@ -1,3 +1,6 @@
+import { createTextStreamTarget } from "./dom.ts";
+import { type Message, type Provider, callLLM } from "./llm.ts";
+
 const refreshButton = document.getElementById(
 	"btn-refresh",
 ) as HTMLButtonElement;
@@ -47,8 +50,8 @@ async function initializeOllama() {
 	modelSelect.innerHTML = "";
 	for (const model of tags.models) {
 		const option = document.createElement("option");
-		option.value = "ollama:" + model.name;
-		option.textContent = "ollama:" + model.name;
+		option.value = `ollama:${model.name}`;
+		option.textContent = `ollama:${model.name}`;
 		modelSelect.appendChild(option);
 	}
 
@@ -75,8 +78,8 @@ async function initializeOpenAI() {
 	const models = await response.json();
 	for (const model of models.data) {
 		const option = document.createElement("option");
-		option.value = "openai:" + model.id;
-		option.textContent = "openai:" + model.id;
+		option.value = `openai:${model.id}`;
+		option.textContent = `openai:${model.id}`;
 		modelSelect.appendChild(option);
 	}
 
@@ -107,16 +110,16 @@ function initializeHistory() {
 				.querySelector("li") as HTMLLIElement;
 			const anchor = clone.querySelector("a") as HTMLAnchorElement;
 			anchor.href = `/#${id}`;
-			const idNode = clone.querySelector("[data-id]")!;
+			const idNode = clone.querySelector("[data-id]") as HTMLElement;
 			idNode.textContent = id;
-			const previewNode = clone.querySelector("[data-preview]")!;
+			const previewNode = clone.querySelector("[data-preview]") as HTMLElement;
 			previewNode.innerHTML =
 				localStorage.getItem(`content-${id}`)?.slice(0, 100) || "";
-			const inputNode = clone.querySelector("[data-input]")! as
+			const inputNode = clone.querySelector("[data-input]") as
 				| HTMLInputElement
 				| HTMLButtonElement;
 			inputNode.value = id;
-			const form = clone.querySelector("form")! as HTMLFormElement;
+			const form = clone.querySelector("form") as HTMLFormElement;
 			form.addEventListener("submit", async (event) => {
 				event.preventDefault();
 				localStorage.removeItem(`content-${id}`);
@@ -207,7 +210,7 @@ historyForm.addEventListener("submit", (event) => {
 });
 
 settingsForm.addEventListener("submit", (event) => {
-	if (Boolean(event.submitter?.dataset.discard)) {
+	if (event.submitter?.dataset.discard) {
 		viewTransition(() => {
 			settingsDialog.close();
 		});
@@ -253,12 +256,6 @@ document.addEventListener("keydown", (event) => {
 	}
 });
 
-// window.history.pushState = new Proxy(window.history.pushState, {
-// 	apply: () => {
-// 		// trigger here what you need
-// 		initializeContent();
-// 	},
-// });
 addEventListener("hashchange", () => {
 	initializeContent();
 	if (historyDialog.open) {
@@ -275,40 +272,6 @@ function abortMessage() {
 	sendController.abort();
 	sendController = new AbortController();
 }
-
-type Message = {
-	role: string;
-	content: string;
-};
-
-type MessageChunk = {
-	created_at: string;
-	message: {
-		content: string;
-		role: string;
-		tool_calls?: {
-			function: {
-				name: string;
-				arguments: Record<string, unknown>;
-			};
-		}[];
-	};
-	model: string;
-} & (
-	| {
-			done: false;
-	  }
-	| {
-			done: true;
-			done_reason: string;
-			eval_count: number;
-			eval_duration: number;
-			load_duration: number;
-			prompt_eval_count: number;
-			prompt_eval_duration: number;
-			total_duration: number;
-	  }
-);
 
 const loadingClasses = [
 	"loading",
@@ -336,136 +299,32 @@ async function sendMessage() {
 		}
 	});
 
+	const streamText = createTextStreamTarget(responseElement);
+
 	try {
 		const modelSelection = modelSelect.value || modelSelect.options[0].value;
-		const [provider, ...nameParts] = modelSelection.split(":");
+		const [provider, ...nameParts] = modelSelection.split(":") as [
+			Provider,
+			...string[],
+		];
 		const model = nameParts.join(":");
 
-		if (provider === "ollama") {
-			const url = new URL(
-				localStorage.getItem("setting-ollama-base-url") ||
-					"http://localhost:11434",
-			);
-			url.pathname += "api/chat";
-			const response = await fetch(url, {
-				method: "POST",
-				body: JSON.stringify({
-					model,
-					messages,
-				}),
-				signal: sendController.signal,
-			});
+		const chunks = await callLLM({
+			messages,
+			model,
+			provider,
+			signal: sendController.signal,
+			ollama: {
+				baseURL: localStorage.getItem("setting-ollama-base-url"),
+			},
+			openai: {
+				apiKey: localStorage.getItem("setting-openai-auth-token"),
+				baseURL: localStorage.getItem("setting-openai-base-url"),
+			},
+		});
 
-			const chunks = response
-				.body!.pipeThrough(new TextDecoderStream())
-				.pipeThrough(new LineByLineStream())
-				.pipeThrough(new JsonDecoderStream<MessageChunk>());
-
-			const reader = chunks.getReader();
-			let buffer = "";
-			let lastFlushTime = 0;
-
-			const flushBuffer = () => {
-				if (buffer !== "") {
-					responseElement.innerText += buffer;
-					buffer = "";
-					lastFlushTime = performance.now();
-				}
-			};
-
-			const tryFlushBuffer = () => {
-				const now = performance.now();
-				const timeSinceLastFlush = now - lastFlushTime;
-				if (timeSinceLastFlush > 1000 / 30) {
-					// 30fps max
-					flushBuffer();
-				}
-			};
-
-			try {
-				for (;;) {
-					const { value, done } = await reader.read();
-					if (done || value.done) {
-						break;
-					}
-					buffer += value.message.content;
-					requestAnimationFrame(tryFlushBuffer);
-				}
-			} finally {
-				reader.releaseLock();
-				// Ensure any remaining buffer is flushed
-				flushBuffer();
-			}
-		} else if (provider === "openai") {
-			const apiKey = localStorage.getItem("setting-openai-auth-token") || "";
-			let baseURL =
-				localStorage.getItem("setting-openai-base-url") ||
-				"https://api.openai.com/v1/";
-			if (!baseURL.endsWith("/")) {
-				baseURL += "/";
-			}
-			const url = new URL(baseURL);
-			url.pathname += "chat/completions";
-			const response = await fetch(url, {
-				method: "POST",
-				headers: {
-					Authorization: apiKey ? `Bearer ${apiKey}` : "",
-					"Content-Type": "application/json",
-				},
-				body: JSON.stringify({
-					model,
-					messages,
-					stream: true,
-				}),
-			});
-			const chunks = response
-				.body!.pipeThrough(new TextDecoderStream())
-				.pipeThrough(new EventStream());
-
-			const reader = chunks.getReader();
-			let buffer = "";
-			let lastFlushTime = 0;
-
-			const flushBuffer = () => {
-				if (buffer !== "") {
-					responseElement.innerText += buffer;
-					buffer = "";
-					lastFlushTime = performance.now();
-				}
-			};
-
-			const tryFlushBuffer = () => {
-				const now = performance.now();
-				const timeSinceLastFlush = now - lastFlushTime;
-				if (timeSinceLastFlush > 1000 / 30) {
-					// 30fps max
-					flushBuffer();
-				}
-			};
-
-			try {
-				for (;;) {
-					const {
-						value: [, data] = [, ""],
-						done,
-					} = await reader.read();
-					if (done || data === "[DONE]") {
-						break;
-					}
-					const chunk = JSON.parse(data);
-					const content = chunk?.choices?.[0]?.delta?.content;
-					if (typeof content === "string") {
-						buffer += content;
-						requestAnimationFrame(tryFlushBuffer);
-					}
-				}
-			} finally {
-				reader.releaseLock();
-				// Ensure any remaining buffer is flushed
-				flushBuffer();
-			}
-		} else {
-			throw new Error("Unsupported provider");
+		for await (const chunk of chunks) {
+			streamText(chunk);
 		}
 	} finally {
 		assistantNode.classList.remove(...loadingClasses);
@@ -553,109 +412,13 @@ function newTextNode(text = "") {
 
 function placeCaretAtEnd(el: HTMLElement) {
 	el.focus();
-	var range = document.createRange();
+	const range = document.createRange();
 	range.selectNodeContents(el);
 	range.collapse(false);
-	var sel = window.getSelection();
+	const sel = window.getSelection();
 	if (sel) {
 		sel.removeAllRanges();
 		sel.addRange(range);
-	}
-}
-
-class LineByLineStream extends TransformStream<string, string> {
-	constructor() {
-		let buffer = "";
-
-		super({
-			transform(chunk, controller) {
-				buffer += chunk;
-				const lines = buffer.split("\n");
-				buffer = lines.pop() || "";
-				lines.forEach((line) => controller.enqueue(line));
-			},
-			flush(controller) {
-				if (buffer.length > 0) controller.enqueue(buffer);
-			},
-		});
-	}
-}
-
-class JsonDecoderStream<T = unknown> extends TransformStream<string, T> {
-	constructor() {
-		super({
-			transform(chunk, controller) {
-				try {
-					const message = JSON.parse(chunk);
-					controller.enqueue(message);
-				} catch (error) {
-					console.error("Failed to parse JSON:", error);
-				}
-			},
-		});
-	}
-}
-
-class EventStream extends TransformStream<
-	string,
-	[name: string, data: string]
-> {
-	constructor() {
-		let buffer = "";
-		let currentEventName = "";
-		let currentEventData = "";
-
-		super({
-			transform(chunk, controller) {
-				buffer += chunk;
-
-				// Process lines in the buffer
-				let start = 0;
-				while (true) {
-					const newlineIndex = buffer.indexOf("\n", start);
-					if (newlineIndex === -1) break;
-
-					// Extract one line (without the trailing newline)
-					const line = buffer.slice(start, newlineIndex).trimEnd();
-					start = newlineIndex + 1;
-
-					if (!line) {
-						// If we hit a blank line, that’s the end of one SSE event
-						if (currentEventData) {
-							controller.enqueue([
-								currentEventName || "message",
-								currentEventData,
-							]);
-						}
-						currentEventName = "";
-						currentEventData = "";
-					} else if (line.startsWith("event:")) {
-						// event: ...
-						currentEventName = line.slice(6).trim();
-					} else if (line.startsWith("data:")) {
-						// data: ...
-						const dataPart = line.slice(5).trim();
-						if (currentEventData) {
-							// Append to existing data (SSE can have multiple "data:" lines)
-							currentEventData += "\n" + dataPart;
-						} else {
-							currentEventData = dataPart;
-						}
-					}
-					// Other fields (id:, retry:) can be handled similarly if needed
-				}
-
-				// Preserve the remainder of the buffer for the next transform call
-				buffer = buffer.slice(start);
-			},
-
-			flush: (controller) => {
-				// If there’s leftover data that wasn’t terminated by an empty line
-				if (currentEventData) {
-					controller.enqueue([currentEventName || "message", currentEventData]);
-				}
-			},
-		});
 	}
 }
 
